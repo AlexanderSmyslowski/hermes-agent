@@ -81,6 +81,13 @@ from gateway.platforms.base import (
     SUPPORTED_IMAGE_DOCUMENT_TYPES,
     utf16_len,
 )
+from gateway.platforms.adh_review import (
+    AdhReviewConfigError,
+    AdhReviewUnauthorized,
+    AdhReviewUnavailable,
+    fetch_cards_for_sender,
+    review_callback_for_sender,
+)
 from gateway.platforms.telegram_network import (
     TelegramFallbackTransport,
     discover_fallback_ips,
@@ -3375,6 +3382,15 @@ class TelegramAdapter(BasePlatformAdapter):
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
 
+        # --- ADH draft review callbacks (adhrev:action:type:id) ---
+        if data.startswith("adhrev:"):
+            await self._handle_adh_review_callback(
+                query,
+                data,
+                query_chat_id=query_chat_id,
+            )
+            return
+
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
@@ -5341,10 +5357,98 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         await self._ensure_forum_commands(msg)
 
+        if self._is_adh_inbox_command(msg.text):
+            await self._handle_adh_inbox_command(msg)
+            return
+
         event = self._build_message_event(msg, MessageType.COMMAND, update_id=update.update_id)
         event.text = self._clean_bot_trigger_text(event.text)
         event = self._apply_telegram_group_observe_attribution(event)
         await self.handle_message(event)
+
+    @staticmethod
+    def _is_adh_inbox_command(text: str) -> bool:
+        token = (text or "").strip().split(maxsplit=1)[0].lower()
+        command = token.split("@", 1)[0]
+        return command == "/adh_inbox"
+
+    @staticmethod
+    def _adh_sender_ids_from_message(message: Message) -> tuple[str | None, str | None]:
+        chat = getattr(message, "chat", None)
+        from_user = getattr(message, "from_user", None)
+        chat_id = getattr(chat, "id", None)
+        user_id = getattr(from_user, "id", None)
+        return (
+            str(chat_id) if chat_id is not None else None,
+            str(user_id) if user_id is not None else None,
+        )
+
+    async def _handle_adh_inbox_command(self, msg: Message) -> None:
+        chat_id, user_id = self._adh_sender_ids_from_message(msg)
+        try:
+            cards = fetch_cards_for_sender(chat_id=chat_id, user_id=user_id)
+        except AdhReviewUnauthorized:
+            await msg.reply_text("Nicht fuer ADH Review freigegeben.")
+            return
+        except (AdhReviewUnavailable, AdhReviewConfigError, ValueError) as exc:
+            logger.warning("[%s] ADH review inbox unavailable: %s", self.name, exc)
+            await msg.reply_text("ADH Review ist gerade nicht verfuegbar.")
+            return
+        except Exception as exc:
+            logger.warning("[%s] ADH review inbox failed: %s", self.name, exc, exc_info=True)
+            await msg.reply_text("ADH Review konnte nicht geladen werden.")
+            return
+
+        if not cards:
+            await msg.reply_text("Keine offenen Karten.")
+            return
+
+        for card in cards:
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Merken", callback_data=card.accept_callback),
+                        InlineKeyboardButton("Verwerfen", callback_data=card.reject_callback),
+                    ]
+                ]
+            )
+            await msg.reply_text(card.text, reply_markup=keyboard)
+
+    async def _handle_adh_review_callback(
+        self,
+        query: Any,
+        data: str,
+        *,
+        query_chat_id: object | None,
+    ) -> None:
+        caller_id = str(getattr(query.from_user, "id", ""))
+        try:
+            result = review_callback_for_sender(
+                chat_id=query_chat_id,
+                user_id=caller_id,
+                data=data,
+            )
+        except AdhReviewUnauthorized:
+            await query.answer(text="Nicht fuer ADH Review freigegeben.")
+            return
+        except ValueError:
+            await query.answer(text="Ungueltige Review-Aktion.")
+            return
+        except (AdhReviewUnavailable, AdhReviewConfigError) as exc:
+            logger.warning("[%s] ADH review callback unavailable: %s", self.name, exc)
+            await query.answer(text="ADH Review ist gerade nicht verfuegbar.")
+            return
+        except Exception as exc:
+            logger.warning("[%s] ADH review callback failed: %s", self.name, exc, exc_info=True)
+            await query.answer(text="ADH Review konnte nicht gespeichert werden.")
+            return
+
+        await query.answer(text=result.message)
+        if result.status == "ok":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
 
     async def _handle_location_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming location/venue pin messages."""
