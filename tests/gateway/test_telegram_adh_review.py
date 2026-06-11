@@ -284,8 +284,8 @@ def _patch_telegram_buttons(monkeypatch, telegram_mod):
 
 
 class FakeMessage:
-    def __init__(self) -> None:
-        self.chat = SimpleNamespace(id=111)
+    def __init__(self, *, chat_type: str | None = "private") -> None:
+        self.chat = SimpleNamespace(id=111, type=chat_type)
         self.from_user = SimpleNamespace(id=123456789)
         self.replies = []
 
@@ -307,6 +307,46 @@ async def test_telegram_command_sends_empty_inbox_message(monkeypatch) -> None:
     await adapter._handle_adh_inbox_command(message)
 
     assert message.replies == [{"text": "Keine offenen Karten."}]
+
+
+@pytest.mark.asyncio
+async def test_telegram_command_rejects_group_before_fetch(monkeypatch) -> None:
+    _install_telegram_mock(monkeypatch)
+    from gateway.config import PlatformConfig
+    from gateway.platforms import telegram as telegram_mod
+
+    def fail_fetch(**_kwargs):
+        raise AssertionError("group /adh_inbox must not read ADH")
+
+    monkeypatch.setattr(telegram_mod, "fetch_cards_for_sender", fail_fetch)
+    adapter = telegram_mod.TelegramAdapter(PlatformConfig(enabled=True, token="test"))
+    message = FakeMessage(chat_type="group")
+
+    await adapter._handle_adh_inbox_command(message)
+
+    assert message.replies == [
+        {"text": "ADH Review ist nur im privaten Chat freigegeben."}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_command_rejects_missing_chat_type_before_fetch(monkeypatch) -> None:
+    _install_telegram_mock(monkeypatch)
+    from gateway.config import PlatformConfig
+    from gateway.platforms import telegram as telegram_mod
+
+    def fail_fetch(**_kwargs):
+        raise AssertionError("unknown chat type must not read ADH")
+
+    monkeypatch.setattr(telegram_mod, "fetch_cards_for_sender", fail_fetch)
+    adapter = telegram_mod.TelegramAdapter(PlatformConfig(enabled=True, token="test"))
+    message = FakeMessage(chat_type=None)
+
+    await adapter._handle_adh_inbox_command(message)
+
+    assert message.replies == [
+        {"text": "ADH Review ist nur im privaten Chat freigegeben."}
+    ]
 
 
 @pytest.mark.asyncio
@@ -338,8 +378,9 @@ async def test_telegram_command_sends_cards_with_review_buttons(monkeypatch) -> 
 
 
 class FakeQuery:
-    def __init__(self) -> None:
+    def __init__(self, *, chat_type: str | None = "private") -> None:
         self.from_user = SimpleNamespace(id=123456789)
+        self.message = SimpleNamespace(chat=SimpleNamespace(id=111, type=chat_type))
         self.answers = []
         self.edits = []
 
@@ -372,3 +413,49 @@ async def test_telegram_callback_resolves_and_disables_buttons(monkeypatch) -> N
 
     assert query.answers == ["Gemerkt."]
     assert query.edits == [{"reply_markup": None}]
+
+
+@pytest.mark.asyncio
+async def test_telegram_callback_rejects_group_before_review(monkeypatch) -> None:
+    _install_telegram_mock(monkeypatch)
+    from gateway.config import PlatformConfig
+    from gateway.platforms import telegram as telegram_mod
+
+    def fail_review(**_kwargs):
+        raise AssertionError("group callback must not write ADH")
+
+    monkeypatch.setattr(telegram_mod, "review_callback_for_sender", fail_review)
+    adapter = telegram_mod.TelegramAdapter(PlatformConfig(enabled=True, token="test"))
+    query = FakeQuery(chat_type="supergroup")
+
+    await adapter._handle_adh_review_callback(
+        query,
+        "adhrev:a:f:10000000-0000-4000-8000-000000000701",
+        query_chat_id=111,
+    )
+
+    assert query.answers == ["ADH Review ist nur im privaten Chat freigegeben."]
+    assert query.edits == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_callback_rejects_missing_chat_type_before_review(monkeypatch) -> None:
+    _install_telegram_mock(monkeypatch)
+    from gateway.config import PlatformConfig
+    from gateway.platforms import telegram as telegram_mod
+
+    def fail_review(**_kwargs):
+        raise AssertionError("unknown chat type callback must not write ADH")
+
+    monkeypatch.setattr(telegram_mod, "review_callback_for_sender", fail_review)
+    adapter = telegram_mod.TelegramAdapter(PlatformConfig(enabled=True, token="test"))
+    query = FakeQuery(chat_type=None)
+
+    await adapter._handle_adh_review_callback(
+        query,
+        "adhrev:a:f:10000000-0000-4000-8000-000000000701",
+        query_chat_id=111,
+    )
+
+    assert query.answers == ["ADH Review ist nur im privaten Chat freigegeben."]
+    assert query.edits == []

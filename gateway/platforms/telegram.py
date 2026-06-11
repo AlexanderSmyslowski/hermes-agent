@@ -5383,7 +5383,18 @@ class TelegramAdapter(BasePlatformAdapter):
             str(user_id) if user_id is not None else None,
         )
 
+    @staticmethod
+    def _is_adh_private_chat(chat: object | None) -> bool:
+        if chat is None:
+            return False
+        chat_type = getattr(chat, "type", None)
+        chat_type_value = getattr(chat_type, "value", chat_type)
+        return str(chat_type_value or "").split(".")[-1].lower() == "private"
+
     async def _handle_adh_inbox_command(self, msg: Message) -> None:
+        if not self._is_adh_private_chat(getattr(msg, "chat", None)):
+            await msg.reply_text("ADH Review ist nur im privaten Chat freigegeben.")
+            return
         chat_id, user_id = self._adh_sender_ids_from_message(msg)
         try:
             cards = fetch_cards_for_sender(chat_id=chat_id, user_id=user_id)
@@ -5421,6 +5432,10 @@ class TelegramAdapter(BasePlatformAdapter):
         *,
         query_chat_id: object | None,
     ) -> None:
+        query_message = getattr(query, "message", None)
+        if not self._is_adh_private_chat(getattr(query_message, "chat", None)):
+            await query.answer(text="ADH Review ist nur im privaten Chat freigegeben.")
+            return
         caller_id = str(getattr(query.from_user, "id", ""))
         try:
             result = review_callback_for_sender(

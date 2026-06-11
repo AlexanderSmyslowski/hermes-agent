@@ -4,6 +4,10 @@ Hermes can expose Agent Data Hub draft cards in Telegram for trusted internal
 review. This is a human review channel, not an authentication or permission
 system.
 
+ADH Telegram review is private-chat only by default. Group, supergroup, and
+channel review are intentionally out of scope for now; this avoids accidental
+draft-card exposure in shared chats.
+
 Required environment:
 
 ```bash
@@ -40,6 +44,7 @@ Flow:
 Boundaries:
 
 - unknown Telegram senders cannot read or write ADH review data
+- non-private Telegram chats cannot read or write ADH review data
 - invalid reviewer handles cannot read or write ADH review data
 - every accept/reject requires an explicit button press
 - there is no bulk accept, auto accept, role model, or tenancy model
